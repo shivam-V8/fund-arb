@@ -47,7 +47,11 @@ ONDO_CONTRACTS_URL = "https://api.ondoperps.xyz/v1/perps/contracts"
 ONDO_HIST_URL = "https://api.ondoperps.xyz/v1/perps/funding_rate_history"
 DEFAULT_DEX = "xyz"                 # TradeXYZ HIP-3 perp dex on Hyperliquid
 HOURS_PER_YEAR = 24 * 365          # 8760
-AVG24_WINDOW_H = 24                 # trailing window for the funding average
+AVG24_WINDOW_H = 24                 # short trailing window for the funding average
+AVG7D_WINDOW_H = 24 * 7            # long trailing window (168h). One 7d fetch
+                                   # yields both windows: 7d uses all of it, 24h
+                                   # uses the last 24 samples. Well within the
+                                   # per-request caps (HL 500 recs, Ondo 1000).
 HTTP_TIMEOUT = 15
 USER_AGENT = "funding-arb/1.0 (+stdlib)"
 
@@ -174,27 +178,67 @@ def fetch_ondo():
     return out
 
 
-def _avg_hl_funding(coin_raw, window_h):
-    """Mean of realized hourly funding for an HL coin over the window. -> (avg, n)."""
-    start = int((time.time() - window_h * 3600) * 1000)
+def _hl_series(coin_raw, lookback_h):
+    """Realized hourly funding for an HL coin -> sorted [(time_ms, rate), ...].
+
+    HL returns up to 500 records FORWARD from startTime, so the trailing window
+    must be <= ~500h; 7d (168) is comfortably inside that cap."""
+    start = int((time.time() - lookback_h * 3600) * 1000)
     data = _http_json(HL_INFO_URL, method="POST",
                      body={"type": "fundingHistory", "coin": coin_raw,
                            "startTime": start})
-    rates = [_to_float(d.get("fundingRate")) for d in (data or [])]
-    rates = [r for r in rates if r is not None]
-    return (sum(rates) / len(rates), len(rates)) if rates else (None, 0)
+    out = []
+    for d in (data or []):
+        t = _to_float(d.get("time"))
+        r = _to_float(d.get("fundingRate"))
+        if t is not None and r is not None:
+            out.append((t, r))
+    out.sort()
+    return out
 
 
-def _avg_ondo_funding(market_raw, window_h):
-    """Mean of realized hourly funding for an Ondo market over the window. -> (avg, n)."""
-    start = int((time.time() - window_h * 3600) * 1000)
+def _ondo_series(market_raw, lookback_h):
+    """Realized hourly funding for an Ondo market -> sorted [(time_ms, rate), ...].
+
+    Ondo caps at 1000 records and stamps each row with an ISO-8601 `time`
+    string (not epoch ms), so parse it explicitly."""
+    start = int((time.time() - lookback_h * 3600) * 1000)
     url = ONDO_HIST_URL + "?" + urllib.parse.urlencode(
         {"market": market_raw, "startTime": start, "limit": 1000})
     payload = _http_json(url, method="GET")
     res = payload.get("result") if isinstance(payload, dict) else None
-    rates = [_to_float(d.get("fundingRate")) for d in (res or [])]
-    rates = [r for r in rates if r is not None]
+    out = []
+    for d in (res or []):
+        r = _to_float(d.get("fundingRate"))
+        if r is None:
+            continue
+        ts = d.get("time") or d.get("fundingTime") or d.get("createdAt")
+        try:
+            t = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() * 1000
+        except (TypeError, ValueError):
+            t = None
+        if t is not None:
+            out.append((t, r))
+    out.sort()
+    return out
+
+
+def _mean_window(series, window_h, now_ms):
+    """Mean of the rates in `series` whose timestamp is within the trailing
+    window_h hours of now_ms. -> (avg, n)."""
+    cutoff = now_ms - window_h * 3600 * 1000
+    rates = [r for (t, r) in series if t >= cutoff]
     return (sum(rates) / len(rates), len(rates)) if rates else (None, 0)
+
+
+def _avg_hl_funding(coin_raw, window_h):
+    """Mean of realized hourly funding for an HL coin over the window. -> (avg, n)."""
+    return _mean_window(_hl_series(coin_raw, window_h), window_h, int(time.time() * 1000))
+
+
+def _avg_ondo_funding(market_raw, window_h):
+    """Mean of realized hourly funding for an Ondo market over the window. -> (avg, n)."""
+    return _mean_window(_ondo_series(market_raw, window_h), window_h, int(time.time() * 1000))
 
 
 def apply_funding_avg(hl, ondo, window_h, mock=False):
@@ -230,13 +274,15 @@ def apply_funding_avg(hl, ondo, window_h, mock=False):
             pass
 
 
-def attach_funding_avg24(hl, ondo, window_h=24, mock=False, max_workers=6):
-    """Attach a trailing-window average of hourly funding to paired coins,
-    stored in SEPARATE fields (avg24_hr / avg24_n) so the live instantaneous
-    rate is preserved. The dashboard then shows current vs trailing side by side.
+def attach_funding_averages(hl, ondo, mock=False, max_workers=6):
+    """Attach BOTH a 24h and a 7d trailing average of hourly funding to paired
+    coins, stored in SEPARATE fields (avg24_hr/avg24_n, avg7d_hr/avg7d_n) so the
+    live instantaneous rate is preserved and shown alongside them.
 
-    History calls run concurrently to keep a refresh snappy; any per-coin
-    failure simply leaves that coin without an average (the UI shows '—')."""
+    Each venue is fetched ONCE over the longer (7d) window; the 24h average is
+    derived from the last 24 samples of that same series, so adding the 7d view
+    costs no extra HTTP calls. Fetches run concurrently; any per-coin failure
+    simply leaves that coin without averages (the UI shows '—')."""
     paired = (set(hl) & set(ondo)) - EXCLUDE_CANON
 
     if mock:
@@ -244,25 +290,35 @@ def attach_funding_avg24(hl, ondo, window_h=24, mock=False, max_workers=6):
             for venue in (hl[canon], ondo[canon]):
                 if "avg24" in venue:
                     venue["avg24_hr"] = venue["avg24"]
-                    venue["avg24_n"] = window_h
+                    venue["avg24_n"] = AVG24_WINDOW_H
+                if "avg7d" in venue or "avg24" in venue:
+                    venue["avg7d_hr"] = venue.get("avg7d", venue.get("avg24"))
+                    venue["avg7d_n"] = AVG7D_WINDOW_H
         return
 
+    now_ms = int(time.time() * 1000)
+
     def task(venue, canon):
-        fetch = _avg_hl_funding if venue == "hl" else _avg_ondo_funding
+        fetch = _hl_series if venue == "hl" else _ondo_series
         store = hl[canon] if venue == "hl" else ondo[canon]
         try:
-            avg, n = fetch(store["raw_name"], window_h)
+            series = fetch(store["raw_name"], AVG7D_WINDOW_H)
         except (urllib.error.URLError, ValueError, TimeoutError):
-            avg, n = None, 0
-        return venue, canon, avg, n
+            series = []
+        a24, n24 = _mean_window(series, AVG24_WINDOW_H, now_ms)
+        a7d, n7d = _mean_window(series, AVG7D_WINDOW_H, now_ms)
+        return venue, canon, a24, n24, a7d, n7d
 
     jobs = [(v, c) for c in paired for v in ("hl", "ondo")]
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for venue, canon, avg, n in ex.map(lambda a: task(*a), jobs):
-            if avg is not None:
-                store = hl[canon] if venue == "hl" else ondo[canon]
-                store["avg24_hr"] = avg
-                store["avg24_n"] = n
+        for venue, canon, a24, n24, a7d, n7d in ex.map(lambda a: task(*a), jobs):
+            store = hl[canon] if venue == "hl" else ondo[canon]
+            if a24 is not None:
+                store["avg24_hr"] = a24
+                store["avg24_n"] = n24
+            if a7d is not None:
+                store["avg7d_hr"] = a7d
+                store["avg7d_n"] = n7d
 
 
 # ----------------------------------------------------------------------------
@@ -312,12 +368,17 @@ def compute_spreads(hl, ondo, hl_taker=DEFAULT_HL_TAKER):
             if mid:
                 basis_bps = (ondo_mark - hl_mark) / mid * 1e4
 
-        # 24h trailing average funding (separate from the live instant rate).
-        # avg24_annual is the durable run-rate spread vs the noisier instant one.
+        # Trailing-average funding (separate from the live instant rate). The
+        # *_annual spreads are the durable run-rate vs the noisier instant one;
+        # 7d smooths further than 24h.
         hl_avg = h.get("avg24_hr")
         ondo_avg = o.get("avg24_hr")
         avg24_capture = (abs(hl_avg - ondo_avg)
                          if (hl_avg is not None and ondo_avg is not None) else None)
+        hl_avg7 = h.get("avg7d_hr")
+        ondo_avg7 = o.get("avg7d_hr")
+        avg7d_capture = (abs(hl_avg7 - ondo_avg7)
+                         if (hl_avg7 is not None and ondo_avg7 is not None) else None)
 
         rows.append({
             "symbol": canon,
@@ -349,6 +410,13 @@ def compute_spreads(hl, ondo, hl_taker=DEFAULT_HL_TAKER):
             "avg24_annual": (avg24_capture * HOURS_PER_YEAR) if avg24_capture is not None else None,
             "hl_avg24_n": h.get("avg24_n"),
             "ondo_avg24_n": o.get("avg24_n"),
+            "hl_avg7d_hr": hl_avg7,
+            "ondo_avg7d_hr": ondo_avg7,
+            "hl_avg7d_annual": (hl_avg7 * HOURS_PER_YEAR) if hl_avg7 is not None else None,
+            "ondo_avg7d_annual": (ondo_avg7 * HOURS_PER_YEAR) if ondo_avg7 is not None else None,
+            "avg7d_annual": (avg7d_capture * HOURS_PER_YEAR) if avg7d_capture is not None else None,
+            "hl_avg7d_n": h.get("avg7d_n"),
+            "ondo_avg7d_n": o.get("avg7d_n"),
         })
     rows.sort(key=lambda r: r["annual"], reverse=True)
     return rows
@@ -364,7 +432,7 @@ def snapshot(dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER, mock=False, avg_window=
     if avg_window and avg_window > 0:
         apply_funding_avg(hl, ondo, avg_window, mock=mock)
     if with_avg24:
-        attach_funding_avg24(hl, ondo, AVG24_WINDOW_H, mock=mock)
+        attach_funding_averages(hl, ondo, mock=mock)
     rows = compute_spreads(hl, ondo, hl_taker=hl_taker)
     basis = (f"{avg_window}h trailing avg" if avg_window and avg_window > 0
              else "instant (current interval)")
@@ -374,6 +442,7 @@ def snapshot(dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER, mock=False, avg_window=
         "funding_basis": basis,
         "avg_window": avg_window or 0,
         "avg24_window": AVG24_WINDOW_H if with_avg24 else 0,
+        "avg7d_window": AVG7D_WINDOW_H if with_avg24 else 0,
         "hl_markets": len(hl),
         "ondo_markets": len(ondo),
         "paired_markets": len(rows),
@@ -633,22 +702,22 @@ def serve(port, host="127.0.0.1", dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER,
 
 def _mock_payloads():
     hl = {
-        "NVDA":  {"funding_hr": 0.0000463, "avg24": 0.0000351, "mark": 178.0, "oracle": 178.1, "oi_usd": 8_200_000, "raw_name": "xyz:NVDA"},
-        "TSLA":  {"funding_hr": 0.0000125, "avg24": 0.0000210, "mark": 412.0, "oracle": 412.2, "oi_usd": 6_100_000, "raw_name": "xyz:TSLA"},
-        "AAPL":  {"funding_hr": -0.0000210, "avg24": -0.0000090, "mark": 228.0, "oracle": 228.0, "oi_usd": 3_400_000, "raw_name": "xyz:AAPL"},
-        "META":  {"funding_hr": 0.0000901, "avg24": 0.0000540, "mark": 720.0, "oracle": 719.5, "oi_usd": 1_900_000, "raw_name": "xyz:META"},
-        "AMZN":  {"funding_hr": 0.0000125, "avg24": 0.0000140, "mark": 235.0, "oracle": 235.0, "oi_usd": 2_500_000, "raw_name": "xyz:AMZN"},
-        "GOLD":  {"funding_hr": 0.0000332, "avg24": 0.0000300, "mark": 3380.0, "oracle": 3380.0, "oi_usd": 14_000_000, "raw_name": "xyz:GOLD"},
-        "XYZ100":{"funding_hr": 0.0000200, "avg24": 0.0000180, "mark": 26100.0, "oracle": 26090.0, "oi_usd": 70_000_000, "raw_name": "xyz:XYZ100"},
+        "NVDA":  {"funding_hr": 0.0000463, "avg24": 0.0000351, "avg7d": 0.0000300, "mark": 178.0, "oracle": 178.1, "oi_usd": 8_200_000, "raw_name": "xyz:NVDA"},
+        "TSLA":  {"funding_hr": 0.0000125, "avg24": 0.0000210, "avg7d": 0.0000240, "mark": 412.0, "oracle": 412.2, "oi_usd": 6_100_000, "raw_name": "xyz:TSLA"},
+        "AAPL":  {"funding_hr": -0.0000210, "avg24": -0.0000090, "avg7d": 0.0000020, "mark": 228.0, "oracle": 228.0, "oi_usd": 3_400_000, "raw_name": "xyz:AAPL"},
+        "META":  {"funding_hr": 0.0000901, "avg24": 0.0000540, "avg7d": 0.0000470, "mark": 720.0, "oracle": 719.5, "oi_usd": 1_900_000, "raw_name": "xyz:META"},
+        "AMZN":  {"funding_hr": 0.0000125, "avg24": 0.0000140, "avg7d": 0.0000165, "mark": 235.0, "oracle": 235.0, "oi_usd": 2_500_000, "raw_name": "xyz:AMZN"},
+        "GOLD":  {"funding_hr": 0.0000332, "avg24": 0.0000300, "avg7d": 0.0000285, "mark": 3380.0, "oracle": 3380.0, "oi_usd": 14_000_000, "raw_name": "xyz:GOLD"},
+        "XYZ100":{"funding_hr": 0.0000200, "avg24": 0.0000180, "avg7d": 0.0000175, "mark": 26100.0, "oracle": 26090.0, "oi_usd": 70_000_000, "raw_name": "xyz:XYZ100"},
     }
     ondo = {
-        "NVDA": {"funding_hr": 0.0000125, "avg24": 0.0000150, "funding_last": 0.0000130, "mark": 178.1, "oi_usd": 1_200_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "NVDA-USD.P"},
-        "TSLA": {"funding_hr": 0.0000540, "avg24": 0.0000420, "funding_last": 0.0000500, "mark": 412.3, "oi_usd": 900_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "TSLA-USD.P"},
-        "AAPL": {"funding_hr": 0.0000125, "avg24": 0.0000120, "funding_last": 0.0000125, "mark": 228.1, "oi_usd": 700_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "AAPL-USD.P"},
-        "META": {"funding_hr": 0.0000180, "avg24": 0.0000160, "funding_last": 0.0000200, "mark": 719.0, "oi_usd": 500_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "META-USD.P"},
-        "AMZN": {"funding_hr": 0.0000125, "avg24": 0.0000130, "funding_last": 0.0000125, "mark": 235.1, "oi_usd": 600_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "AMZN-USD.P"},
-        "XAU":  {"funding_hr": 0.0000125, "avg24": 0.0000125, "funding_last": 0.0000125, "mark": 3381.0, "oi_usd": 2_000_000, "taker": 0.0004, "maker": 0.0001, "raw_name": "XAU-USD.P"},
-        "QQQ":  {"funding_hr": 0.0000150, "avg24": 0.0000150, "funding_last": 0.0000150, "mark": 540.0, "oi_usd": 3_000_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "QQQ-USD.P"},
+        "NVDA": {"funding_hr": 0.0000125, "avg24": 0.0000150, "avg7d": 0.0000142, "funding_last": 0.0000130, "mark": 178.1, "oi_usd": 1_200_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "NVDA-USD.P"},
+        "TSLA": {"funding_hr": 0.0000540, "avg24": 0.0000420, "avg7d": 0.0000380, "funding_last": 0.0000500, "mark": 412.3, "oi_usd": 900_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "TSLA-USD.P"},
+        "AAPL": {"funding_hr": 0.0000125, "avg24": 0.0000120, "avg7d": 0.0000125, "funding_last": 0.0000125, "mark": 228.1, "oi_usd": 700_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "AAPL-USD.P"},
+        "META": {"funding_hr": 0.0000180, "avg24": 0.0000160, "avg7d": 0.0000155, "funding_last": 0.0000200, "mark": 719.0, "oi_usd": 500_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "META-USD.P"},
+        "AMZN": {"funding_hr": 0.0000125, "avg24": 0.0000130, "avg7d": 0.0000135, "funding_last": 0.0000125, "mark": 235.1, "oi_usd": 600_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "AMZN-USD.P"},
+        "XAU":  {"funding_hr": 0.0000125, "avg24": 0.0000125, "avg7d": 0.0000128, "funding_last": 0.0000125, "mark": 3381.0, "oi_usd": 2_000_000, "taker": 0.0004, "maker": 0.0001, "raw_name": "XAU-USD.P"},
+        "QQQ":  {"funding_hr": 0.0000150, "avg24": 0.0000150, "avg7d": 0.0000150, "funding_last": 0.0000150, "mark": 540.0, "oi_usd": 3_000_000, "taker": 0.0005, "maker": 0.0002, "raw_name": "QQQ-USD.P"},
     }
     return hl, ondo
 
