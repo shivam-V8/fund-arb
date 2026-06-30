@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Funding Arbitrage · xyz ⇄ Ondo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#14161F; --bg2:#1B1E2B; --panel:#1B1E2B; --line:#2A2E3D; --line2:#363B4F;
+    --txt:#EAECEF; --muted:#8A90A6; --dim:#5C6178;
+    --hl:#5FE3C0;        /* Hyperliquid identity (mint-teal) */
+    --ondo:#F2B544;      /* Ondo identity (amber)            */
+    --warn:#FF6B6B;      /* fee drag / thin liquidity        */
+    --good:#7CF2B8;
+    --radius:13px;
+    --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+    --disp:"Space Grotesk",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--disp)}
+  body{
+    padding:26px clamp(14px,4vw,46px) 60px;
+    background-image:
+      radial-gradient(900px 380px at 12% -8%, rgba(95,227,192,.07), transparent 60%),
+      radial-gradient(900px 380px at 92% -8%, rgba(242,181,68,.07), transparent 60%);
+    background-attachment:fixed;
+  }
+
+  /* ---- top bar ---- */
+  .top{display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px 30px;
+       border-bottom:1px solid var(--line);padding-bottom:20px}
+  .brand{display:flex;flex-direction:column;gap:8px;margin-right:auto}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.32em;
+           text-transform:uppercase;color:var(--muted)}
+  .pair{display:flex;align-items:center;gap:11px;font-size:clamp(22px,3.4vw,33px);
+        font-weight:700;letter-spacing:-.01em;line-height:1}
+  .chip{display:inline-flex;align-items:center;gap:8px;padding:6px 13px;border-radius:999px;
+        font-family:var(--mono);font-size:14px;font-weight:600;border:1px solid var(--line2)}
+  .chip .dot{width:8px;height:8px;border-radius:50%}
+  .chip.hl{color:var(--hl)} .chip.hl .dot{background:var(--hl)}
+  .chip.ondo{color:var(--ondo)} .chip.ondo .dot{background:var(--ondo)}
+  .swap{color:var(--dim);font-family:var(--mono);font-weight:500}
+
+  .controls{display:flex;flex-wrap:wrap;align-items:center;gap:14px 20px;
+            font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .ctl{display:flex;align-items:center;gap:9px}
+  .ctl label{letter-spacing:.06em;text-transform:uppercase;font-size:11px}
+  select,input[type=range]{accent-color:var(--hl)}
+  select{background:var(--bg2);color:var(--txt);border:1px solid var(--line2);
+         border-radius:8px;padding:6px 9px;font-family:var(--mono);font-size:12.5px}
+  .thr{color:var(--txt);min-width:48px;text-align:right}
+  .status{display:flex;align-items:center;gap:8px}
+  .live{width:9px;height:9px;border-radius:50%;background:var(--good);
+        box-shadow:0 0 0 0 rgba(124,242,184,.6);animation:pulse 2.4s infinite}
+  .live.stale{background:var(--warn);animation:none}
+  .live.mock{background:var(--ondo);animation:none}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(124,242,184,.5)}
+                   70%{box-shadow:0 0 0 7px rgba(124,242,184,0)}
+                   100%{box-shadow:0 0 0 0 rgba(124,242,184,0)}}
+  .stamp{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+
+  /* ---- hero (single best opportunity = the thesis) ---- */
+  .hero{display:grid;grid-template-columns:1.4fr 1fr;gap:18px;margin:24px 0 8px}
+  @media(max-width:760px){.hero{grid-template-columns:1fr}}
+  .lead{background:linear-gradient(135deg,rgba(95,227,192,.06),rgba(242,181,68,.06));
+        border:1px solid var(--line2);border-radius:var(--radius);padding:22px 24px;
+        display:flex;flex-direction:column;gap:6px;position:relative;overflow:hidden}
+  .lead .tag{font-family:var(--mono);font-size:11px;letter-spacing:.26em;
+             text-transform:uppercase;color:var(--muted)}
+  .lead .big{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+  .lead .sym{font-family:var(--mono);font-size:clamp(30px,5vw,46px);font-weight:700}
+  .lead .apr{font-family:var(--mono);font-size:clamp(30px,5vw,46px);font-weight:700;
+             color:var(--good)}
+  .lead .apr small{font-size:.45em;color:var(--muted);font-weight:500;letter-spacing:.04em}
+  .lead .dir{font-family:var(--mono);font-size:14px;color:var(--txt);margin-top:2px}
+  .lead .dir b{font-weight:600}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+        padding:15px 16px;display:flex;flex-direction:column;gap:6px;justify-content:center}
+  .stat .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+           text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:23px;font-weight:600}
+
+  /* ---- table ---- */
+  .wrap{margin-top:18px;border:1px solid var(--line);border-radius:var(--radius);
+        overflow-x:auto;overflow-y:hidden;background:var(--panel);
+        -webkit-overflow-scrolling:touch;scrollbar-color:var(--line2) transparent}
+  .wrap::-webkit-scrollbar{height:10px}
+  .wrap::-webkit-scrollbar-thumb{background:var(--line2);border-radius:999px}
+  .wrap::-webkit-scrollbar-track{background:transparent}
+  table{width:100%;min-width:880px;border-collapse:collapse;font-family:var(--mono);font-size:13px}
+  thead th{position:sticky;top:0;background:#191C28;color:var(--muted);
+           font-weight:500;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+           text-align:right;padding:13px 16px;border-bottom:1px solid var(--line2);
+           cursor:pointer;white-space:nowrap;user-select:none}
+  thead th:first-child{text-align:left}
+  thead th .arr{color:var(--hl);font-size:9px;margin-left:3px}
+  tbody td{padding:13px 16px;text-align:right;border-bottom:1px solid var(--line);
+           white-space:nowrap}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:rgba(255,255,255,.018)}
+  .sym{text-align:left;font-weight:700;font-size:14px;letter-spacing:.02em}
+  .pos{color:var(--hl)} .neg{color:var(--ondo)}        /* funding sign uses venue-neutral cue */
+  .num .a{color:var(--muted);font-size:11.5px;letter-spacing:.02em}
+  .num .a b{color:var(--txt);font-weight:600}
+  .stk{font-family:var(--mono);font-size:12.5px;line-height:1.55;text-align:right}
+  .stk div{display:flex;align-items:center;justify-content:flex-end;gap:6px}
+  .stk .vd{width:6px;height:6px;border-radius:50%;flex:none}
+  .stk .vd.hl{background:var(--hl)} .stk .vd.ondo{background:var(--ondo)}
+  .stk .basis{color:var(--dim);font-size:10.5px;margin-top:1px}
+  .stk .basis.wide{color:var(--warn)}
+  .smp{color:var(--dim);font-size:10px;margin-top:1px}
+  .smp.thin{color:var(--warn)}
+  #basis{color:var(--hl)}
+  .apr-cell{font-weight:700;font-size:15px}
+  .apr-cell.hot{color:var(--good)}
+  .be.warn{color:var(--warn)}
+
+  /* signature: diverging funding bar */
+  .barcell{width:230px}
+  @media(max-width:920px){.barcell{display:none}}
+  @media(max-width:1180px){.col-px{display:none}}
+  .bar{position:relative;height:30px;width:210px;margin-left:auto}
+  .bar .axis{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--line2)}
+  .bar .seg{position:absolute;top:50%;height:9px;transform:translateY(-50%);border-radius:2px}
+  .bar .seg.hl{background:var(--hl);right:50%}
+  .bar .seg.ondo{background:var(--ondo);left:50%}
+  .bar .seg.hl.short{box-shadow:0 0 0 1px #fff inset, 0 0 7px rgba(95,227,192,.6)}
+  .bar .seg.ondo.short{box-shadow:0 0 0 1px #fff inset, 0 0 7px rgba(242,181,68,.6)}
+  .bar .lbl{position:absolute;top:-1px;font-size:9px;color:var(--dim)}
+  .bar .lbl.l{left:0}.bar .lbl.r{right:0}
+
+  .badge{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;
+         padding:5px 10px;border-radius:7px;border:1px solid var(--line2);background:var(--bg)}
+  .badge .s{color:var(--warn)} .badge .l{color:var(--good)}
+  .badge .v{color:var(--dim);font-weight:500}
+
+  .flash-up{animation:fu .8s ease-out} .flash-dn{animation:fd .8s ease-out}
+  @keyframes fu{0%{color:var(--good)}100%{}}
+  @keyframes fd{0%{color:var(--warn)}100%{}}
+
+  .empty{padding:46px 30px;text-align:center;color:var(--muted);font-family:var(--mono);
+          font-size:13px;line-height:1.7}
+  .empty code{background:var(--bg);border:1px solid var(--line2);border-radius:6px;
+              padding:3px 8px;color:var(--hl)}
+  .err{color:var(--warn)}
+
+  footer{margin-top:22px;font-family:var(--mono);font-size:11.5px;color:var(--dim);
+         line-height:1.85;max-width:920px}
+  footer b{color:var(--muted);font-weight:600}
+
+  @media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand">
+      <span class="eyebrow">Funding-rate arbitrage · tokenized stock perps</span>
+      <div class="pair">
+        <span class="chip hl"><span class="dot"></span>Hyperliquid&nbsp;xyz</span>
+        <span class="swap">⇄</span>
+        <span class="chip ondo"><span class="dot"></span>Ondo&nbsp;Perps</span>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="ctl status">
+        <span id="live" class="live"></span><span id="livetxt">connecting…</span>
+      </div>
+      <div class="ctl">
+        <label for="thr">min APR</label>
+        <input id="thr" type="range" min="0" max="100" step="5" value="0">
+        <span id="thrv" class="thr">0%</span>
+      </div>
+      <div class="ctl">
+        <label for="iv">refresh</label>
+        <select id="iv">
+          <option value="0">manual</option>
+          <option value="15">15s</option>
+          <option value="30" selected>30s</option>
+          <option value="60">60s</option>
+        </select>
+      </div>
+      <div class="stamp" id="basis">—</div>
+      <div class="stamp" id="stamp">—</div>
+    </div>
+  </div>
+
+  <div class="hero">
+    <div class="lead">
+      <span class="tag">Widest spread right now</span>
+      <div class="big">
+        <span class="sym" id="lead-sym">—</span>
+        <span class="apr" id="lead-apr">—<small>&nbsp;APR</small></span>
+      </div>
+      <div class="dir" id="lead-dir">waiting for data…</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="k">Paired markets</span><span class="v" id="s-paired">—</span></div>
+      <div class="stat"><span class="k">Above threshold</span><span class="v" id="s-above">—</span></div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th data-k="symbol">Symbol</th>
+          <th class="barcell">xyz ◂ funding/hr ▸ Ondo</th>
+          <th data-k="hl_funding_hr">HL funding<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">hr · annual</span></th>
+          <th data-k="ondo_funding_hr">Ondo funding<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">hr · annual</span></th>
+          <th data-k="annual">Spread APR<span class="arr">▾</span></th>
+          <th>Direction</th>
+          <th data-k="breakeven_hr">B/E hrs</th>
+          <th class="col-px">Price<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">HL · Ondo · basis</span></th>
+          <th data-k="min_oi_usd" class="col-oi">Open interest<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">HL · Ondo</span></th>
+        </tr>
+      </thead>
+      <tbody id="rows">
+        <tr><td colspan="9" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <div><b>How to read this.</b> Funding settles hourly on both venues; rates shown are the current-interval estimate. Spread APR = (higher − lower hourly funding) × 8760, assuming you hold the pair delta-neutral. You <b>short</b> the higher-funding venue and <b>long</b> the lower one to receive the spread.</div>
+    <div><b>Reality check.</b> The APR annualises a single hourly print — funding mean-reverts, so a wide spread rarely lasts. <b>B/E hrs</b> is how long you must hold just to cover round-trip taker fees on both legs; if the spread closes first you net nothing. Overnight / weekend prints (US market closed) are noisier on both oracles and can fabricate spreads. Min OI caps how much size you can run, and the two oracles can drift — that basis risk can swamp the funding you collect.</div>
+  </footer>
+
+<script>
+const $=s=>document.querySelector(s);
+let sortKey="annual", sortDir=-1, last={}, timer=null;
+
+const fmtPct=(x,dp=4)=>x==null?"—":(x*100>=0?"+":"")+(x*100).toFixed(dp)+"%";
+const fmtApr=x=>x==null?"—":(x*100).toFixed(1)+"%";
+const money=x=>{if(x==null)return"—";if(x>=1e6)return"$"+(x/1e6).toFixed(1)+"M";
+  if(x>=1e3)return"$"+(x/1e3).toFixed(0)+"K";return"$"+x.toFixed(0);};
+const price=x=>x==null?"—":(x>=1000?"$"+x.toLocaleString(undefined,{maximumFractionDigits:0})
+  :"$"+x.toFixed(2));
+
+function setLive(state,txt){
+  const el=$("#live"); el.className="live"+(state?" "+state:"");
+  $("#livetxt").textContent=txt;
+}
+
+async function load(){
+  try{
+    const r=await fetch("/api/spreads",{cache:"no-store"});
+    const snap=await r.json();
+    if(snap.error){throw new Error(snap.error);}
+    render(snap);
+    setLive("","live");
+    $("#stamp").textContent="updated "+new Date(snap.generated_at).toLocaleTimeString();
+  }catch(e){
+    setLive("stale","offline");
+    if(!Object.keys(last).length){
+      $("#rows").innerHTML='<tr><td colspan="9" class="empty err">'+
+        'No connection to the data server.<br>Start it with '+
+        '<code>python funding_arb.py --serve 8787</code> and open '+
+        '<code>http://127.0.0.1:8787</code>.<br><br>'+
+        (e&&e.message?("("+e.message+")"):"")+'</td></tr>';
+    }
+  }
+}
+
+function render(snap){
+  const thr=Number($("#thr").value)/100;
+  let rows=snap.rows.filter(r=>r.annual>=thr);
+  rows.sort((a,b)=>{
+    const av=a[sortKey], bv=b[sortKey];
+    if(av==null)return 1; if(bv==null)return -1;
+    return (av<bv?-1:av>bv?1:0)*sortDir;
+  });
+
+  // hero = best by APR regardless of current sort
+  const best=[...snap.rows].sort((a,b)=>b.annual-a.annual)[0];
+  if(best){
+    $("#lead-sym").textContent=best.symbol;
+    $("#lead-apr").innerHTML=fmtApr(best.annual)+'<small>&nbsp;APR</small>';
+    const sv=best.short_leg==="Hyperliquid"?"xyz":"Ondo";
+    const lv=best.long_leg==="Hyperliquid"?"xyz":"Ondo";
+    $("#lead-dir").innerHTML='<b style="color:var(--warn)">short '+sv+
+      '</b> &nbsp;/&nbsp; <b style="color:var(--good)">long '+lv+'</b>'+
+      ' &nbsp;·&nbsp; '+fmtPct(best.capture_hr)+' / hr';
+  }
+  $("#s-paired").textContent=snap.paired_markets;
+  $("#s-above").textContent=rows.length;
+  $("#basis").textContent="funding · "+(snap.funding_basis||"instant");
+
+  // scale for diverging bar
+  let maxF=0;
+  rows.forEach(r=>{maxF=Math.max(maxF,Math.abs(r.hl_funding_hr),Math.abs(r.ondo_funding_hr));});
+  maxF=maxF||1e-9;
+
+  if(!rows.length){
+    $("#rows").innerHTML='<tr><td colspan="9" class="empty">No spreads above '+
+      Math.round(thr*100)+'% APR.</td></tr>';
+    return;
+  }
+
+  $("#rows").innerHTML=rows.map(r=>{
+    const sv=r.short_leg==="Hyperliquid"?"xyz":"Ondo";
+    const lv=r.long_leg==="Hyperliquid"?"xyz":"Ondo";
+    const hlW=Math.min(100,Math.abs(r.hl_funding_hr)/maxF*100);
+    const onW=Math.min(100,Math.abs(r.ondo_funding_hr)/maxF*100);
+    const hlShort=r.short_leg==="Hyperliquid"?" short":"";
+    const onShort=r.short_leg==="Ondo"?" short":"";
+    const be=r.breakeven_hr==null?"—":r.breakeven_hr.toFixed(1);
+    const beWarn=(r.breakeven_hr!=null&&r.breakeven_hr>48)?" warn":"";
+    const hot=r.annual>=0.20?" hot":"";
+    const prev=last[r.symbol];
+    const fl=prev?(r.annual>prev?" flash-up":r.annual<prev?" flash-dn":""):"";
+    return `<tr>
+      <td class="sym">${r.symbol}</td>
+      <td class="barcell"><div class="bar">
+        <span class="lbl l">xyz</span><span class="lbl r">Ondo</span>
+        <span class="axis"></span>
+        <span class="seg hl${hlShort}" style="width:${hlW/2}%"></span>
+        <span class="seg ondo${onShort}" style="width:${onW/2}%"></span>
+      </div></td>
+      <td class="num"><span class="${r.hl_funding_hr<0?'neg':'pos'}">${fmtPct(r.hl_funding_hr)}</span>
+        <div class="a"><b>${fmtApr(r.hl_funding_annual)}</b> / yr</div>
+        ${r.hl_samples!=null?`<div class="smp${r.hl_samples<snap.avg_window*0.5?' thin':''}">${snap.avg_window}h avg · n=${r.hl_samples}</div>`:''}</td>
+      <td class="num"><span class="${r.ondo_funding_hr<0?'neg':'pos'}">${fmtPct(r.ondo_funding_hr)}</span>
+        <div class="a"><b>${fmtApr(r.ondo_funding_annual)}</b> / yr</div>
+        ${r.ondo_samples!=null?`<div class="smp${r.ondo_samples<snap.avg_window*0.5?' thin':''}">${snap.avg_window}h avg · n=${r.ondo_samples}</div>`:''}</td>
+      <td class="apr-cell${hot}${fl}">${fmtApr(r.annual)}</td>
+      <td><span class="badge"><span class="s">short ${sv}</span>
+        <span class="l">long ${lv}</span></span></td>
+      <td class="be${beWarn}">${be}</td>
+      <td class="col-px"><div class="stk">
+        <div><span class="vd hl"></span>${price(r.hl_mark)}</div>
+        <div><span class="vd ondo"></span>${price(r.ondo_mark)}</div>
+        <div class="basis${(r.basis_bps!=null&&Math.abs(r.basis_bps)>=25)?' wide':''}">${r.basis_bps==null?'':(r.basis_bps>=0?'+':'')+r.basis_bps.toFixed(0)+' bp basis'}</div>
+      </div></td>
+      <td class="col-oi"><div class="stk">
+        <div><span class="vd hl"></span>${money(r.hl_oi_usd)}</div>
+        <div><span class="vd ondo"></span>${money(r.ondo_oi_usd)}</div>
+      </div></td>
+    </tr>`;
+  }).join("");
+
+  last={}; rows.forEach(r=>last[r.symbol]=r.annual);
+}
+
+// sorting
+document.querySelectorAll("thead th[data-k]").forEach(th=>{
+  th.addEventListener("click",()=>{
+    const k=th.dataset.k;
+    if(k===sortKey)sortDir*=-1; else{sortKey=k;sortDir=(k==="symbol")?1:-1;}
+    document.querySelectorAll("thead .arr").forEach(a=>a.remove());
+    const arr=document.createElement("span");arr.className="arr";
+    arr.textContent=sortDir<0?"▾":"▴";th.appendChild(arr);
+    load();
+  });
+});
+$("#thr").addEventListener("input",e=>{$("#thrv").textContent=e.target.value+"%";load();});
+function schedule(){if(timer)clearInterval(timer);const s=Number($("#iv").value);
+  if(s>0)timer=setInterval(load,s*1000);}
+$("#iv").addEventListener("change",schedule);
+
+load(); schedule();
+</script>
+</body>
+</html>
