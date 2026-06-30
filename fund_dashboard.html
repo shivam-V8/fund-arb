@@ -112,8 +112,11 @@
   .stk .vd.hl{background:var(--hl)} .stk .vd.ondo{background:var(--ondo)}
   .stk .basis{color:var(--dim);font-size:10.5px;margin-top:1px}
   .stk .basis.wide{color:var(--warn)}
-  .smp{color:var(--dim);font-size:10px;margin-top:1px}
+  .smp{color:var(--muted);font-size:10.5px;margin-top:2px}
+  .smp b{color:var(--txt);font-weight:600}
   .smp.thin{color:var(--warn)}
+  .smp.thin b{color:var(--warn)}
+  .apr-cell .smp{font-weight:400;font-size:10.5px}
   #basis{color:var(--hl)}
   .apr-cell{font-weight:700;font-size:15px}
   .apr-cell.hot{color:var(--good)}
@@ -209,9 +212,9 @@
         <tr>
           <th data-k="symbol">Symbol</th>
           <th class="barcell">xyz ◂ funding/hr ▸ Ondo</th>
-          <th data-k="hl_funding_hr">HL funding<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">hr · annual</span></th>
-          <th data-k="ondo_funding_hr">Ondo funding<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">hr · annual</span></th>
-          <th data-k="annual">Spread APR<span class="arr">▾</span></th>
+          <th data-k="hl_funding_hr">HL funding<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">hr · annual · 24h avg</span></th>
+          <th data-k="ondo_funding_hr">Ondo funding<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">hr · annual · 24h avg</span></th>
+          <th data-k="annual">Spread APR<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">now · 24h avg</span><span class="arr">▾</span></th>
           <th>Direction</th>
           <th data-k="breakeven_hr">B/E hrs</th>
           <th class="col-px">Price<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">HL · Ondo · basis</span></th>
@@ -225,7 +228,7 @@
   </div>
 
   <footer>
-    <div><b>How to read this.</b> Funding settles hourly on both venues; rates shown are the current-interval estimate. Spread APR = (higher − lower hourly funding) × 8760, assuming you hold the pair delta-neutral. You <b>short</b> the higher-funding venue and <b>long</b> the lower one to receive the spread.</div>
+    <div><b>How to read this.</b> Funding settles hourly on both venues; the top rate in each funding cell is the current-interval estimate, and <b>24h</b> is the realized trailing-24-hour average (annualized, with sample count <i>n</i>) — a more durable run-rate than a single noisy print. Spread APR = (higher − lower hourly funding) × 8760, assuming you hold the pair delta-neutral; the <b>24h</b> line under it is that same spread computed from the trailing averages. You <b>short</b> the higher-funding venue and <b>long</b> the lower one to receive the spread.</div>
     <div><b>Reality check.</b> The APR annualises a single hourly print — funding mean-reverts, so a wide spread rarely lasts. <b>B/E hrs</b> is how long you must hold just to cover round-trip taker fees on both legs; if the spread closes first you net nothing. Overnight / weekend prints (US market closed) are noisier on both oracles and can fabricate spreads. Min OI caps how much size you can run, and the two oracles can drift — that basis risk can swamp the funding you collect.</div>
   </footer>
 
@@ -239,6 +242,8 @@ const money=x=>{if(x==null)return"—";if(x>=1e6)return"$"+(x/1e6).toFixed(1)+"M
   if(x>=1e3)return"$"+(x/1e3).toFixed(0)+"K";return"$"+x.toFixed(0);};
 const price=x=>x==null?"—":(x>=1000?"$"+x.toLocaleString(undefined,{maximumFractionDigits:0})
   :"$"+x.toFixed(2));
+const avg24=(a,n)=>a==null?'<div class="smp">24h —</div>'
+  :`<div class="smp${(n!=null&&n<12)?' thin':''}">24h <b>${fmtApr(a)}</b>/yr${n!=null?` · n=${n}`:''}</div>`;
 
 function setLive(state,txt){
   const el=$("#live"); el.className="live"+(state?" "+state:"");
@@ -322,11 +327,12 @@ function render(snap){
       </div></td>
       <td class="num"><span class="${r.hl_funding_hr<0?'neg':'pos'}">${fmtPct(r.hl_funding_hr)}</span>
         <div class="a"><b>${fmtApr(r.hl_funding_annual)}</b> / yr</div>
-        ${r.hl_samples!=null?`<div class="smp${r.hl_samples<snap.avg_window*0.5?' thin':''}">${snap.avg_window}h avg · n=${r.hl_samples}</div>`:''}</td>
+        ${avg24(r.hl_avg24_annual,r.hl_avg24_n)}</td>
       <td class="num"><span class="${r.ondo_funding_hr<0?'neg':'pos'}">${fmtPct(r.ondo_funding_hr)}</span>
         <div class="a"><b>${fmtApr(r.ondo_funding_annual)}</b> / yr</div>
-        ${r.ondo_samples!=null?`<div class="smp${r.ondo_samples<snap.avg_window*0.5?' thin':''}">${snap.avg_window}h avg · n=${r.ondo_samples}</div>`:''}</td>
-      <td class="apr-cell${hot}${fl}">${fmtApr(r.annual)}</td>
+        ${avg24(r.ondo_avg24_annual,r.ondo_avg24_n)}</td>
+      <td class="apr-cell${hot}${fl}">${fmtApr(r.annual)}
+        ${r.avg24_annual!=null?`<div class="smp">24h ${fmtApr(r.avg24_annual)}</div>`:''}</td>
       <td><span class="badge"><span class="s">short ${sv}</span>
         <span class="l">long ${lv}</span></span></td>
       <td class="be${beWarn}">${be}</td>

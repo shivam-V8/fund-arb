@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import csv as csvmod
 import json
 import os
@@ -46,6 +47,7 @@ ONDO_CONTRACTS_URL = "https://api.ondoperps.xyz/v1/perps/contracts"
 ONDO_HIST_URL = "https://api.ondoperps.xyz/v1/perps/funding_rate_history"
 DEFAULT_DEX = "xyz"                 # TradeXYZ HIP-3 perp dex on Hyperliquid
 HOURS_PER_YEAR = 24 * 365          # 8760
+AVG24_WINDOW_H = 24                 # trailing window for the funding average
 HTTP_TIMEOUT = 15
 USER_AGENT = "funding-arb/1.0 (+stdlib)"
 
@@ -228,6 +230,41 @@ def apply_funding_avg(hl, ondo, window_h, mock=False):
             pass
 
 
+def attach_funding_avg24(hl, ondo, window_h=24, mock=False, max_workers=6):
+    """Attach a trailing-window average of hourly funding to paired coins,
+    stored in SEPARATE fields (avg24_hr / avg24_n) so the live instantaneous
+    rate is preserved. The dashboard then shows current vs trailing side by side.
+
+    History calls run concurrently to keep a refresh snappy; any per-coin
+    failure simply leaves that coin without an average (the UI shows '—')."""
+    paired = (set(hl) & set(ondo)) - EXCLUDE_CANON
+
+    if mock:
+        for canon in paired:
+            for venue in (hl[canon], ondo[canon]):
+                if "avg24" in venue:
+                    venue["avg24_hr"] = venue["avg24"]
+                    venue["avg24_n"] = window_h
+        return
+
+    def task(venue, canon):
+        fetch = _avg_hl_funding if venue == "hl" else _avg_ondo_funding
+        store = hl[canon] if venue == "hl" else ondo[canon]
+        try:
+            avg, n = fetch(store["raw_name"], window_h)
+        except (urllib.error.URLError, ValueError, TimeoutError):
+            avg, n = None, 0
+        return venue, canon, avg, n
+
+    jobs = [(v, c) for c in paired for v in ("hl", "ondo")]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for venue, canon, avg, n in ex.map(lambda a: task(*a), jobs):
+            if avg is not None:
+                store = hl[canon] if venue == "hl" else ondo[canon]
+                store["avg24_hr"] = avg
+                store["avg24_n"] = n
+
+
 # ----------------------------------------------------------------------------
 # Spread computation
 # ----------------------------------------------------------------------------
@@ -275,6 +312,13 @@ def compute_spreads(hl, ondo, hl_taker=DEFAULT_HL_TAKER):
             if mid:
                 basis_bps = (ondo_mark - hl_mark) / mid * 1e4
 
+        # 24h trailing average funding (separate from the live instant rate).
+        # avg24_annual is the durable run-rate spread vs the noisier instant one.
+        hl_avg = h.get("avg24_hr")
+        ondo_avg = o.get("avg24_hr")
+        avg24_capture = (abs(hl_avg - ondo_avg)
+                         if (hl_avg is not None and ondo_avg is not None) else None)
+
         rows.append({
             "symbol": canon,
             "hl_funding_hr": f_hl,
@@ -298,12 +342,20 @@ def compute_spreads(hl, ondo, hl_taker=DEFAULT_HL_TAKER):
             "hl_samples": h.get("samples"),
             "ondo_samples": o.get("samples"),
             "funding_src": h.get("funding_src", "instant"),
+            "hl_avg24_hr": hl_avg,
+            "ondo_avg24_hr": ondo_avg,
+            "hl_avg24_annual": (hl_avg * HOURS_PER_YEAR) if hl_avg is not None else None,
+            "ondo_avg24_annual": (ondo_avg * HOURS_PER_YEAR) if ondo_avg is not None else None,
+            "avg24_annual": (avg24_capture * HOURS_PER_YEAR) if avg24_capture is not None else None,
+            "hl_avg24_n": h.get("avg24_n"),
+            "ondo_avg24_n": o.get("avg24_n"),
         })
     rows.sort(key=lambda r: r["annual"], reverse=True)
     return rows
 
 
-def snapshot(dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER, mock=False, avg_window=0):
+def snapshot(dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER, mock=False, avg_window=0,
+             with_avg24=False):
     if mock:
         hl, ondo = _mock_payloads()
     else:
@@ -311,6 +363,8 @@ def snapshot(dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER, mock=False, avg_window=
         ondo = fetch_ondo()
     if avg_window and avg_window > 0:
         apply_funding_avg(hl, ondo, avg_window, mock=mock)
+    if with_avg24:
+        attach_funding_avg24(hl, ondo, AVG24_WINDOW_H, mock=mock)
     rows = compute_spreads(hl, ondo, hl_taker=hl_taker)
     basis = (f"{avg_window}h trailing avg" if avg_window and avg_window > 0
              else "instant (current interval)")
@@ -319,6 +373,7 @@ def snapshot(dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER, mock=False, avg_window=
         "venues": {"short_long_pair": "Hyperliquid(xyz) <-> Ondo Perps"},
         "funding_basis": basis,
         "avg_window": avg_window or 0,
+        "avg24_window": AVG24_WINDOW_H if with_avg24 else 0,
         "hl_markets": len(hl),
         "ondo_markets": len(ondo),
         "paired_markets": len(rows),
@@ -499,7 +554,7 @@ def append_csv(path, snap):
 # ----------------------------------------------------------------------------
 
 def serve(port, host="127.0.0.1", dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER,
-          mock=False, cache_ttl=15, avg_window=0):
+          mock=False, cache_ttl=15, avg_window=0, with_avg24=True):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -516,7 +571,7 @@ def serve(port, host="127.0.0.1", dex=DEFAULT_DEX, hl_taker=DEFAULT_HL_TAKER,
             return cache["data"]
         try:
             cache["data"] = snapshot(dex=dex, hl_taker=hl_taker, mock=mock,
-                                     avg_window=avg_window)
+                                     avg_window=avg_window, with_avg24=with_avg24)
             cache["err"] = None
             cache["at"] = now
         except Exception as exc:

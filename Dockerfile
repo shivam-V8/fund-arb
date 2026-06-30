@@ -11,4 +11,6 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 8787
 
-CMD ["python", "fund_arb.py", "--serve"]
+# --cache-ttl 60: the 24h-average pulls trailing funding history per market
+# (~40 extra calls), so cache the shared snapshot longer to spare the upstream APIs.
+CMD ["python", "fund_arb.py", "--serve", "--cache-ttl", "60"]
