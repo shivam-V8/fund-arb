@@ -1,0 +1,11 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/fund_dashboard.html" }
+  ],
+  "functions": {
+    "api/spreads.py": {
+      "maxDuration": 60,
+      "includeFiles": "fund_arb.py"
+    }
+  }
+}
